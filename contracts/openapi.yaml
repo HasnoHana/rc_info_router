@@ -1,0 +1,280 @@
+# ============================================================
+# contracts/openapi.yaml —— API 契约（stage4 冻结）
+# 冻结后实现期只读；修改需人类批准并补 docs/adr/ 变更记录。
+# 投递语义：至少一次（下游须幂等）；4xx 判死不重试；2xx=送达。
+# ============================================================
+openapi: 3.0.3
+info:
+  title: Internal Notification Delivery Service
+  version: 0.1.0
+  description: >
+    接收业务系统提交的外部 HTTP 通知请求并可靠投递到供应商 API。
+    业务方只关心受理结果；投递进度通过查询接口观测。
+
+paths:
+  /notifications:
+    post:
+      summary: 提交通知任务（受理时渲染快照）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vendor_id, variables]
+              properties:
+                vendor_id:
+                  type: string
+                variables:
+                  type: object
+                  additionalProperties: true
+                  description: 契约变量，受理时按 variables_schema 校验，缺失/多余均 400
+                idempotency_key:
+                  type: string
+                  maxLength: 128
+                  description: >
+                    可选；全局唯一，永久有效。相同 key 的后续提交一律返回首次
+                    task_id，不建新任务（ADR-001）。不同业务事件必须使用不同 key。
+      responses:
+        '202':
+          description: 已受理入队（不代表已投递）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          description: 变量缺失/多余、契约不存在、body 渲染失败
+        '409':
+          description: 无（幂等命中时返回 202 + 原 task_id，不冲突）
+
+  /vendors:
+    get:
+      summary: 列出全部供应商契约
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Vendor'
+
+  /vendors/{vendor_id}:
+    put:
+      summary: 创建或更新供应商契约
+      parameters:
+        - $ref: '#/components/parameters/VendorId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VendorInput'
+      responses:
+        '200':
+          description: 已保存
+        '400':
+          description: 模板格式非法（如占位符语法错误）
+    get:
+      summary: 查看单个契约
+      parameters:
+        - $ref: '#/components/parameters/VendorId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vendor'
+        '404':
+          description: 契约不存在
+
+  /vendors/{vendor_id}/rerender:
+    post:
+      summary: 用当前契约重新渲染该供应商下 pending/retrying 任务
+      description: >
+        契约变更后的显式收尾动作。done 不动；dead 不自动复活。
+        返回受影响任务数。
+      parameters:
+        - $ref: '#/components/parameters/VendorId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rerendered:
+                    type: integer
+
+  /tasks/{task_id}:
+    get:
+      summary: 查询任务状态
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '404':
+          description: 任务不存在
+
+  /tasks:
+    get:
+      summary: 按状态查询任务（最小列表）
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/TaskStatus'
+        - name: vendor_id
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Task'
+
+  /tasks/{task_id}/attempts:
+    get:
+      summary: 查询任务投递历史
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Attempt'
+
+components:
+  parameters:
+    VendorId:
+      name: vendor_id
+      in: path
+      required: true
+      schema:
+        type: string
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    TaskStatus:
+      type: string
+      enum: [pending, delivering, retrying, done, dead]
+
+    VendorInput:
+      type: object
+      required: [name, url_template, method]
+      properties:
+        name:
+          type: string
+        url_template:
+          type: string
+        method:
+          type: string
+          enum: [POST, PUT, PATCH]
+        headers_template:
+          type: object
+          additionalProperties:
+            type: string
+        body_template:
+          type: string
+        variables_schema:
+          type: array
+          items:
+            type: string
+
+    Vendor:
+      allOf:
+        - $ref: '#/components/schemas/VendorInput'
+        - type: object
+          properties:
+            vendor_id:
+              type: string
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+
+    Task:
+      type: object
+      properties:
+        id:
+          type: string
+        vendor_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        attempts:
+          type: integer
+        next_attempt_at:
+          type: string
+          format: date-time
+        idempotency_key:
+          type: string
+          nullable: true
+        last_error:
+          type: string
+          nullable: true
+          description: 最近一次失败摘要（冗余自 attempts，便于单查）
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Attempt:
+      type: object
+      properties:
+        task_id:
+          type: string
+        attempt_no:
+          type: integer
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        outcome:
+          type: string
+          enum: [success, http_4xx, http_5xx, timeout, conn_error, unknown]
+          nullable: true
+        status_code:
+          type: integer
+          nullable: true
+        error_detail:
+          type: string
+          nullable: true
+        duration_ms:
+          type: integer
+          nullable: true

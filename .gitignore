@@ -1,0 +1,11 @@
+# Python 运行时产物
+__pycache__/
+*.py[cod]
+
+# 本地数据（SQLite 数据库不入库，可随时由服务初始化）
+data/
+*.db
+
+# 环境与临时文件
+.env
+*.log
